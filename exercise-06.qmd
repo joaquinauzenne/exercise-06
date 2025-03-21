@@ -1,0 +1,169 @@
+---
+title: "Simulation-Based Inference"
+format: html
+editor: visual
+---
+
+## **Background on the Dataset**
+
+Spider monkeys (genus *Ateles*) live in large multimale-multifemale social groups containing a total of \~20-30 adult individuals. Association patterns among the members of these group are very flexible. It is rare to see more than a handful of the adult members of the group together at any given time, and, instead, group members organize themselves in multiple smaller subgroups, or "parties", that travel separately from one another. Individuals and parties may come together ("fuse"), re-assort their membership, and break apart from one another ("fission") multiple times per day. Each individual, then, shows a different pattern of association with other group members and its own pattern of home range use.
+
+My research group has collected data on the ranging patterns of one species of spider monkeys (*Ateles belzebuth*) in Amazonian Ecuador by following focal individuals and recording their location at regular intervals throughout the day using a GPS. We also record information on the other animals associated with focal individuals at those same intervals. This process yields a large set of location records for each individual based on both when those animals are the focus of focal follows and when they are present in subgroups containing a different focal individual.
+
+Using location records collected over several years, we have generated several measures of home range size for 9 adult males and 11 adult females who are members of one social group of *Ateles belzebuth*.
+
+```{r}
+library(tidyverse)
+library(mosaic)
+library(infer)
+
+f <- "https://raw.githubusercontent.com/difiore/ada-datasets/main/tbs-2006-2008-ranges.csv"
+d <- read_csv(f)
+head(d)
+```
+
+**Determining basic statistics and making bootstrap distribution**
+
+```{r}
+# Reduce the dataset to the 95% CI and sex variable
+d <- d |>
+  select(sex, kernel95)
+
+# Determine the mean, SD, and SE in the 95% CI home range size for each sex
+hr_summary <- d |>
+  group_by(sex) |>
+  summarize(mean = mean(kernel95), sd = sd(kernel95), n = n(), se = sd/sqrt(n))
+hr_summary
+
+# Creating the boxplot comparing kernel95 to home range size by sex
+p <- ggplot(data = d, aes(x = sex, y = kernel95)) +
+  geom_boxplot() +
+  geom_jitter()
+p
+
+# For each sex, generate a bootstrap for mean kernel95 home range size
+n_boot <- 10000
+s <- d |>
+  filter(sex == "M")
+
+# option 1 - using base R
+boot <- vector()
+for (i in 1:n_boot) {
+  boot[[i]] <- mean(sample(s$kernel95, length(s$kernel95), replace = TRUE))
+}
+
+# option 2 - using mosaic
+boot_1 <- do(n_boot) * mean(sample(s$kernel95, size = length(s$kernel95), replace = TRUE))
+boot_1 <- boot_1$mean
+
+
+```
+
+**Plotting the resulting bootstrap sampling distribution and plotting over a normal distribution**
+
+```{r}
+se <- sd(boot)
+histogram(boot)
+plotDist("norm", mean(boot), se, add = TRUE)
+```
+
+**Calculating the 95% CI around for the mean kernel95 home range size for each sex**
+
+```{r}
+ci_boot <- c(quantile(boot, 0.025), quantile(boot, 0.975))
+ci_boot
+
+ci_theory <- mean(s$kernel95) + c(-1,1) * qnorm(0.975) * se
+ci_theory
+
+ladd(panel.abline(v = ci_boot, col = "red", lty = 3, lwd = 2))
+ladd(panel.abline(v = ci_theory, col = "blue", lty = 1, lwd = 2))
+```
+
+**Option 4  - Using {infer}**
+
+```{r}
+boot <- s |>
+  specify(response = kernel95) |>
+  generate(reps = n_boot, type = "bootstrap") |>
+  calculate(stat = "mean")
+
+ci_boot <- boot |>
+  get_confidence_interval(type = "percentile", level = 0.95)
+
+ci_theory <- boot |>
+  get_confidence_interval(type = "se", level = 0.95, point_estimate = mean(s$kernel95))
+
+visualize(boot) + shade_confidence_interval(endpoints = ci_theory, color = "blue",
+                                            lty = 1, size = 0.5, fill = "#c0c0c0") + shade_confidence_interval(endpoints = ci_boot, color = "red", lty = 3, size = 0.5, fill = "#c0c0c0")
+```
+
+**Use simulation-based permutation to evaluate the difference in mean kernel95**
+
+```{r}
+n_perm <- 10000
+permuted_diff <- vector()
+permuted_data <- d
+for (i in 1:n_perm) {
+  # scramble by sex vector, the make random permutation vector
+  permuted_data$sex <- sample(permuted_data$sex)
+  m <- permuted_data[permuted_data$sex == "M", ]$kernel95
+  f <- permuted_data[permuted_data$sex == "F", ]$kernel95
+  permuted_diff[[i]] <- mean(m) - mean(f)
+}
+
+histogram(permuted_diff)
+
+actual_dif <- mean(d[d$sex == "M", ]$kernel95) - mean(d[d$sex == "F", ]$kernel95)
+
+p <- (sum(permuted_diff >= abs(actual_dif)) + sum(permuted_diff <= -abs(actual_dif)))/n_perm
+p
+
+ladd(panel.abline(v = actual_dif, col = "red", lty = 3, lwd = 2))
+```
+
+**Utilizing {infer}**
+
+```{r}
+null_distribution <- d |>
+  specify(formula = kernel95 ~ sex) |>
+  hypothesise(null = "independence") |>
+  generate(reps = n_perm, type = "permute") |>
+  calculate(stat = "diff in means", order = c("M", "F"))
+actual_dif
+
+null_distribution |>
+  get_p_value(obs_stat = actual_dif, direction = "both")
+
+visualize(null_distribution) + shade_p_value(obs_stat = actual_dif, lty = 1, size = 0.5,
+                                             fill = "#c0c0c0", direction = "both")
+
+```
+
+```{r}
+f <- d |>
+  filter(sex == "F")
+
+m <- d |>
+  filter(sex == "M")
+
+var_f <- var(f$kernel95)
+var_m <- var(m$kernel95)
+var_f/var_m
+
+num_f <- nrow(f)
+num_m <- nrow(m)
+
+mean_f <- mean(f$kernel95)
+mean_m <- mean(m$kernel95)
+
+s2 <- ((num_m -1) * var_m + (num_f - 1) * var_f)/(num_m + num_f - 2)
+t_stat <- (mean_m - mean_f)/sqrt(s2 * (1/num_m + 1/num_f))
+
+df <- num_m + num_f - 2
+p <- 2 * (1 - pt(t_stat, df))
+p
+
+t_test <- t.test(x = m$kernel95, y = f$kernel95, var.equal = TRUE)
+t_test
+```
